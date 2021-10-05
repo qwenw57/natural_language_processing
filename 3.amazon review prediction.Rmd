@@ -1,0 +1,287 @@
+---
+title: "ECON630_Lab#3_QingwenWang"
+output: html_document
+---
+
+```{r}
+source("../functions/load_NLP_env.R")
+load_NLP_env("../functions/")
+```
+
+```{r}
+amazon <- read.csv("../datasets/amazon_reviews.csv")
+amazon$reviewText[1]
+```
+
+```{r}
+amazon$label <- ifelse(amazon$overall >3, "positive", "negative")
+```
+
+```{r}
+text <- pre_process_corpus(amazon, "reviewText", replace_numbers = T, root_gen = 'lemmatize')
+
+amazon$review_preprocessed <- text
+
+amazon$review_preprocessed[1]
+```
+
+```{r}
+rand <- runif(nrow(amazon))
+amazon$sets <- ifelse(rand <0.8, 'train', 'test')
+
+train <- amazon[amazon$sets == 'train', c(8,9)]
+test <- amazon[amazon$sets == 'test', c(8,9)]
+```
+
+```{r}
+table(amazon$sets)
+```
+
+```{r}
+# tokenize training data with itoken function, it = 'iterable'  
+it_train <- itoken(train$review_preprocessed, tokenizer = word_tokenizer)
+vocab <- create_vocabulary(it_train, ngram = c(1,3))
+
+lbound <- round(0.009 * nrow(train))
+vocab <- vocab[vocab$doc_count > lbound,]
+head(vocab)
+```
+
+```{r}
+vectorizer <- vocab_vectorizer(vocab)
+dtm_train <- create_dtm(it_train, vectorizer)
+dim(dtm_train)
+```
+
+```{r}
+it_test <- itoken(test$review_preprocessed,
+                   tokenizer = word_tokenizer)
+dtm_test <- create_dtm(it_test, vectorizer)
+dim(dtm_test)
+```
+
+```{r}
+# cv.glmnet():Fit regularized logistic regression model using cross validation 
+  # Regularization: Lasso (alpha = 1)
+library(glmnet)
+model_dtm <- cv.glmnet(x = dtm_train, y = train$label, type.measure = 'auc',
+                              family = 'binomial', alpha = 1)
+```
+
+```{r}
+coefs <- coef(model_dtm, s = "lambda.min")
+coefs <- data.frame(name = coefs@Dimnames[[1]][coefs@i + 1], coefficient = coefs@x)
+nrow(coefs)/ncol(dtm_train)
+```
+
+```{r}
+ggplot(coefs, aes(coefficient)) + geom_histogram(fill = 'lightgreen')
+```
+
+```{r}
+coefs[order(coefs$coefficient, decreasing = T),][1:10,]
+```
+```{r}
+coefs[order(coefs$coefficient),][1:10,]
+```
+
+```{r}
+plot(model_dtm)
+```
+```{r}
+model_dtm
+```
+When lamda equals to 0.0003946, AUC is largest = 0.9007.
+
+```{r}
+# The type="response" option tells R to output probabilities of the form P(Y = 1|X), as opposed to other information such as the logit.
+pred_test <- predict(model_dtm, dtm_test, type = 'response')[,1]
+
+thresh <- 0.5
+table(test$label, pred_test > thresh)
+```
+
+```{r}
+glmnet:::auc(ifelse(test$label == 'positive', 1, 0), pred_test > thresh)
+```
+The accuracy rate of the test set is 70.7% based on term frequency.
+
+
+### Tuning
+
+#### 1. adjust accuracy threshold
+
+```{r}
+thresh_tune<- seq(0.5,0.9,0.05)
+thresh_tune
+sapply(thresh_tune, function(x) {glmnet:::auc(ifelse(test$label == 'positive', 1, 0), pred_test > x)})
+```
+When threshold = 0.8, the corresponding AUC is highest at 0.8245177.
+
+#### 2. TF/IDF weighting
+
+```{r}
+# compute IDF
+number_of_docs <- nrow(dtm_train)
+term_in_docs <- colSums(dtm_train > 0)
+idf <- log(number_of_docs / term_in_docs)
+
+# compute TF/IDF
+tfidf_train <- t(t(dtm_train) * idf)
+tfidf_test <- t(t(dtm_test) * idf)
+```
+
+```{r}
+model_tfidf <- cv.glmnet(x = tfidf_train, y = train$label, type.measure = 'auc',
+                              family = 'binomial', alpha = 1)
+```
+
+```{r}
+plot(model_tfidf)
+```
+
+
+```{r}
+pred_test <- predict(model_tfidf, tfidf_test, type = 'response')[,1]
+
+thresh <- 0.5
+glmnet:::auc(ifelse(test$label == 'positive', 1, 0), pred_test > thresh)
+```
+
+TF/IDF weighting do not have any improvement with this data. Could be because the presence and frequency of terms tells us more about the class of document (ie, its sentiment) than the individual document
+
+#### 3. Ridge
+
+```{r}
+model_ridge <- cv.glmnet(x = dtm_train, y = train$label, type.measure = 'auc',
+                              family = 'binomial', alpha = 0)
+```
+
+```{r}
+pred_test <- predict(model_ridge, dtm_test, type = 'response')[,1]
+thresh <- 0.5
+glmnet:::auc(ifelse(test$label == 'positive', 1, 0), pred_test > thresh)
+```
+```{r}
+coefs_ridge <- coef(model_ridge, s = "lambda.min")
+coefs_ridge <- data.frame(name = coefs_ridge@Dimnames[[1]][coefs_ridge@i + 1], coefficient = coefs_ridge@x)
+ggplot(coefs_ridge, aes(coefficient)) + geom_histogram(fill = 'lightgreen')
+```
+The performance of ridge regularization is 0.6593527, lower than the original model. Lasso approach(original one) enforces small predictors while zeroing out the coefficients with minimal impact on the target. An additional advantage of Lasso is therefore that it performs feature selection. Lasso tends to do better when a small number of predictors contribute most of the model’s explanatory power. Ridge is better if most parameters impact the response and do so roughly equally.
+
+#### 4. cv
+
+```{r}
+model_cv <- cv.glmnet(x = dtm_train, y = train$label, type.measure = 'auc',
+                              family = 'binomial', alpha = 1, nfolds = 5)
+```
+
+```{r}
+pred_test <- predict(model_cv, dtm_test, type = 'response')[,1]
+thresh <- 0.5
+glmnet:::auc(ifelse(test$label == 'positive', 1, 0), pred_test > thresh)
+```
+By modifying the number of cross-validation folds to 5, AUC just got a very slightly increase. 
+
+#### 5. modifying convergence threshold.
+
+```{r}
+model_thresh <- cv.glmnet(x = dtm_train, y = train$label, type.measure = 'auc',
+                              family = 'binomial', alpha = 1, thresh = 1e-10)
+```
+
+```{r}
+pred_test <- predict(model_thresh, dtm_test, type = 'response')[,1]
+thresh <- 0.5
+glmnet:::auc(ifelse(test$label == 'positive', 1, 0), pred_test > thresh)
+```
+
+`thresh` modifies the convergence threshold where the function determines it has settled on its ‘best’ model. The higher the number, the model will train faster (at the expense of some accuracy). So here lower the `tresh` to 1e-10, trying to increase the accuracy. The result shows only a little improvement.
+
+#### 6. upsampling 
+```{r}
+library(caret)
+```
+
+```{r}
+set.seed(111)
+trainup<-upSample(x=train[,2],
+                  y=as.factor(train$label))
+table(trainup$Class)
+```
+```{r}
+colnames(trainup) <- c("review_preprocessed", "label")
+trainup$review_preprocessed <- as.character(trainup$review_preprocessed)
+```
+
+```{r}
+it_trainup <- itoken(trainup$review_preprocessed, tokenizer = word_tokenizer)
+vocab_up <- create_vocabulary(it_trainup, ngram = c(1,3))
+
+lbound <- round(0.009 * nrow(trainup))
+vocab_up <- vocab_up[vocab_up$doc_count > lbound,]
+
+vectorizer_up <- vocab_vectorizer(vocab_up)
+dtm_train_up <- create_dtm(it_trainup, vectorizer_up)
+```
+
+```{r}
+model_dtm_up <- cv.glmnet(x = dtm_train_up, y = trainup$label, type.measure = 'auc',
+                              family = 'binomial', alpha = 1)
+```
+
+```{r}
+max(model_dtm_up$cvm)
+```
+
+```{r}
+it_test <- itoken(test$review_preprocessed,
+                   tokenizer = word_tokenizer)
+dtm_test_up <- create_dtm(it_test, vectorizer_up)
+
+pred_test <- predict(model_dtm_up, dtm_test_up, type = 'response')[,1]
+thresh <- 0.5
+glmnet:::auc(ifelse(test$label == 'positive', 1, 0), pred_test > thresh)
+```
+The accuracy is greatly improved from original 70.7% to 83.4% after oversampling the data. Up-sampling and down-sampling are useful and our dataset are imbalance.
+
+```{r eval=FALSE, include=FALSE}
+set.seed(111)
+traindown<-downSample(x=train[,2],
+                  y=as.factor(train$label))
+table(traindown$Class)
+
+colnames(traindown) <- c("review_preprocessed", "label")
+traindown$review_preprocessed <- as.character(traindown$review_preprocessed)
+
+it_traindown <- itoken(traindown$review_preprocessed, tokenizer = word_tokenizer)
+vocab_down <- create_vocabulary(it_traindown, ngram = c(1,3))
+
+lbound <- round(0.009 * nrow(traindown))
+vocab_down <- vocab_down[vocab_down$doc_count > lbound,]
+
+vectorizer_down <- vocab_vectorizer(vocab_down)
+dtm_train_down <- create_dtm(it_traindown, vectorizer_down)
+```
+
+```{r eval=FALSE, include=FALSE}
+model_dtm_down <- cv.glmnet(x = dtm_train_down, y = traindown$label, type.measure = 'auc',
+                              family = 'binomial', alpha = 1)
+```
+
+```{r eval=FALSE, include=FALSE}
+it_test <- itoken(test$review_preprocessed,
+                   tokenizer = word_tokenizer)
+dtm_test_down <- create_dtm(it_test, vectorizer_down)
+
+pred_test <- predict(model_dtm_down, dtm_test_down, type = 'response')[,1]
+thresh <- 0.5
+glmnet:::auc(ifelse(test$label == 'positive', 1, 0), pred_test > thresh)
+```
+
+For the imbalanced dataset, down sampling, up sampling, SMOTE, ROSE are good methods to balance the ratios of different groups.
+
+Upsampling will return higher accuracy at the huge computational expense. <br>
+Downsampling will sometimes cause problem when original datasets or one class is too small. This original dataset has lots of obversations. So, as the result shows, accuracy is also high at 83.3%, just only slightly lower than the upsampling method, while it saves a lot of computational power. <br>
+
+Overall, adjust accurancy threshold and dowm/up-sampling perform best in this dataset, with accuancy score 82.5%, and 83.3 on test dataset. Mainly because this dataset have much more obversations with positive data, while less with the negative data.

@@ -1,0 +1,161 @@
+---
+title: "ECON630_Lab4_QingwenWang"
+output: html_document
+---
+
+```{r message=FALSE, warning=FALSE}
+source("~/Dropbox/ECON630/functions/load_NLP_env.R")
+load_NLP_env("~/Dropbox/ECON630/functions/")
+```
+
+```{r}
+data <- read.csv("~/Dropbox/ECON630/datasets/amazon_reviews.csv")
+data$reviewText[1]
+```
+
+```{r eval=FALSE}
+text <- pre_process_corpus(data, "reviewText", non_stopwords = stopwords())
+data$text_clean <- text
+write.csv(data, file = "~/Dropbox/ECON630/dataforVM/lab4_preprocessed_data.csv")
+```
+
+Run everything below except analysis part on USF VM.
+```{r  eval=FALSE}
+# set the context window size to 9 and use the unnest_tokens function from the tidytext to separate out the text
+# unnest_tokens() takes in a data frame and creates a vector of all the possible ngrams and adds it as a column to the existing data frame
+skipgrams <- unnest_tokens(subdata, ngram, text_clean, token = "ngrams", n = 9)
+
+# create id
+skipgrams$ngramID <- 1:nrow(skipgrams)
+skipgrams$skipgramID <- paste(skipgrams$reviewerID, skipgrams$ngramID, sep = '_')
+head(skipgrams[, c('ngramID', 'ngram', 'skipgramID')])
+```
+```{r eval=FALSE}
+# use the unnest_tokens function again to separate each of the ngrams 
+skipgrams <- unnest_tokens(skipgrams, word, ngram)
+dim(skipgrams)
+```
+
+```{r eval=FALSE}
+library(widyr)
+skipgram_probs <- pairwise_count(skipgrams, word, skipgramID, diag = T, sort = T)
+skipgram_probs$p <- skipgram_probs$n/sum(skipgram_probs$n)
+skipgram_probs[1:10,]
+```
+```{r eval=FALSE}
+unigram_probs <- unnest_tokens(data, word, text_clean)
+unigram_probs <- count(unigram_probs, word, sort = T)
+unigram_probs$p <- unigram_probs$n/sum(unigram_probs$n)
+
+head(unigram_probs)
+```
+
+```{r eval=FALSE}
+lbound <- 20
+normed_probs <- skipgram_probs[skipgram_probs$n > lbound,]
+
+colnames(normed_probs) <- c('word1', 'word2', 'n', 'p_all')
+normed_probs <- merge(normed_probs, unigram_probs[, c('word', 'p')], by.x = 'word2', by.y = 'word', all.x = T)
+normed_probs <- merge(normed_probs, unigram_probs[, c('word', 'p')], by.x = 'word1', by.y = 'word', all.x = T)
+
+# p_all = probability of seeing a given pair of words in the same window across ALL pairs
+# p.x and p.y = probability of seeing given word across all words
+normed_probs$p_combined <- normed_probs$p_all/normed_probs$p.x/normed_probs$p.y
+
+normed_probs <- normed_probs[order(normed_probs$p_combined, decreasing = T),]
+
+normed_probs$pmi <- log(normed_probs$p_combined)
+pmi_matrix <- cast_sparse(normed_probs, word1, word2, pmi)
+```
+
+```{r eval=FALSE}
+library(irlba)
+pmi_svd <- irlba(pmi_matrix, 256, maxit = 1e3)
+word_vectors <- pmi_svd$u
+rownames(word_vectors) <- rownames(pmi_matrix)
+```
+
+```{r eval=FALSE}
+df <- data.frame(word_vectors)
+save(df,file="~/word_vectors.Rda")
+```
+
+```{r}
+load("~/Dropbox/ECON630/datasets/word_vectors.Rda")
+word_vectors <- data.matrix(df)
+str(word_vectors)
+```
+
+```{r}
+library(dplyr)
+similarities <- word_vectors %*% word_vectors["washerdryer",] %>% as.data.frame() %>%
+  rename(similarity = V1) %>% arrange(-similarity)
+head(similarities,10)
+```
+#### Find common brands and product features for washers, refrigerator, dishwasher and stove.
+
+Washer: <br>
+Common brand: Maytag, LG, Whirlpool <br>
+Feature: vent, oven, duet, combo, convection <br>
+```{r}
+new_vector <- word_vectors["washer",] + word_vectors["washerdryer",] + word_vectors["dryer",] + word_vectors["brand",]
+similarities <- word_vectors %*% new_vector %>% as.data.frame() %>%
+  rename(similarity = V1) %>% arrange(-similarity)
+rownames(similarities)[1:20]
+```
+
+```{r}
+new_vector <- word_vectors["washer",] + word_vectors["washerdryer",] + word_vectors["dryer",] + word_vectors["feature",]
+similarities <- word_vectors %*% new_vector %>% as.data.frame() %>%
+  rename(similarity = V1) %>% arrange(-similarity)
+rownames(similarities)[1:20]
+```
+
+
+Refrigerator: <br>
+Common brand: Samsung, GE, Whirlpool <br>
+Feature: french, door, filters, freezer, door, drawer, oven, convection <br>
+```{r}
+new_vector <- word_vectors["refrigerator",] +word_vectors["brand",]+ word_vectors["feature",]
+similarities <- word_vectors %*% new_vector %>% as.data.frame() %>%
+  rename(similarity = V1) %>% arrange(-similarity)
+rownames(similarities)[1:20]
+```
+
+Dishwasher: <br>
+Common brand: Bosch, GE, Whirlpool <br>
+Feature: rack, drawer, washer, filters, oven <br>
+```{r}
+new_vector <- word_vectors["dishwasher",] + word_vectors["brand",]+ word_vectors["feature",]
+similarities <- word_vectors %*% new_vector %>% as.data.frame() %>%
+  rename(similarity = V1) %>% arrange(-similarity)
+rownames(similarities)[1:20]
+```
+
+Stove: <br>
+Common brand: GE, OEM <br>
+Feature: oven, counter, filters, cooktop, convection, filter, burners <br>
+```{r}
+new_vector <- word_vectors["stove",] + word_vectors["feature",] + word_vectors["brand",] 
+similarities <- word_vectors %*% new_vector %>% as.data.frame() %>%
+  rename(similarity = V1) %>% arrange(-similarity)
+rownames(similarities)[1:30]
+```
+
+Word embedding approach: <br>
+
+The technique of word embedding creates a multi-dimensional space and then calculates representations, or ‘embeddings,’ of each term in the space. A vector of coordinates designates the term’s location in the space and the distance from all other terms. Terms with similar context will have similar locations, so that these locations can be used to find synonyms and analogies. The more proximate terms are to each other, the more contextual characteristics they share.
+
+Advantages: <br> 
+a. Skip Gram works well with small amount of data and is found to represent rare words well. <br>
+b. allow us to learn context between terms by examining the relationship between pairs of words, based on terms' locations presented as a vector of coordinates. <br>
+c. Word vectors help represent semantics of the words. It captures similarities and linear relationships between word vectors <br>
+d. No heavy preprocessing is required, just a corpus. <br>
+
+Disadvantage: <br> 
+a. require high memory for processing, computational expensive. <br> 
+b. Word2Vec cannot capture global context. <br>
+c. Word2Vec fails to handle words without a thesaurus. <br>
+d. no order interactions between words, it doesn't tell word distance in the original text. <br>
+
+

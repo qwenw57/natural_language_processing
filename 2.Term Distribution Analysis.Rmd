@@ -1,0 +1,184 @@
+---
+title: "ECON630_Lab2_Qingwen Wang"
+output: html_document
+---
+### Term Distribution Analysis on the address to the United Nations.
+```{r message=FALSE, warning=FALSE}
+# load functions, not run
+source("../functions/load_NLP_env.R")
+
+# run load_NLP_env() function.
+load_NLP_env("../functions/")
+```
+
+```{r}
+speeches <- read.csv("../datasets/UN_speeches.csv")
+```
+```{r}
+unique(speeches$country)
+```
+
+
+```{r}
+# filter out speeches addressed by the USA
+speeches <- speeches[speeches$country == "USA",]
+dim(speeches)
+```
+
+```{r}
+library(countrycode)
+# prepare replacement for pre_process_corpus()
+countries <- tolower(unique(countryname_dict$country.name.en))
+upper_countries <-toupper(countries)
+```
+
+```{r}
+# call pre_process function to clean data
+text <- pre_process_corpus(speeches, "text", replace_numbers = T, 
+                           replace_strings = c(countries,upper_countries) ,
+                           root_gen = "stem")
+```
+
+```{r eval}
+substr(text[[1]]$content, 1, 200)
+```
+
+```{r}
+tokenizer1 <- function(x) {unlist(lapply(ngrams(words(x), 1), paste, collapse = " "), use.names = FALSE)}
+tokenizer2 <- function(x) {unlist(lapply(ngrams(words(x), 2), paste, collapse = " "), use.names = FALSE)}
+tokenizer3 <- function(x) {unlist(lapply(ngrams(words(x), 3), paste, collapse = " "), use.names = FALSE)}
+
+# set lower bound
+lbound <- round(0.015* length(text))
+
+# create DTM
+dtm1 <- as.matrix(DocumentTermMatrix(text,
+                          control = list(tokenize = tokenizer1,
+                                        bounds = list(global = c(lbound, Inf)))))
+dtm2 <- as.matrix(DocumentTermMatrix(text,
+                          control = list(tokenize = tokenizer2,
+                                        bounds = list(global = c(lbound, Inf)))))
+dtm3 <- as.matrix(DocumentTermMatrix(text,
+                          control = list(tokenize = tokenizer3,
+                                        bounds = list(global = c(lbound, Inf)))))
+
+dtm <- cbind(dtm1, dtm2)
+dtm <- cbind(dtm, dtm3)
+dim(dtm)
+```
+
+```{r}
+freq_table <- data.frame(term = colnames(dtm), n = colSums(dtm),
+                         freq = colSums(dtm)/sum(dtm))
+
+freq_table <- freq_table[order(freq_table$n, decreasing = T),]
+head(freq_table)
+```
+***
+1. Which terms appear the most frequently in the corpus?
+```{r}
+top6 <- freq_table[1:6,]
+ggplot(top6, aes(x = reorder(term, freq), y = freq, fill = term)) + 
+  geom_bar(stat = "identity", show.legend = F) + coord_flip() + xlab("Terms") +  ylab("Frequency")
+```
+
+
+The term "nation" is mentioned mostly in the corpus.
+
+***
+
+2.Which 10 countries' names have been mentioned most often and what is their frequency?
+
+```{r}
+countries_mentioned <- freq_table[freq_table$term %in% countries, ]
+head(countries_mentioned,10)
+```
+
+```{r eval = FALSE}
+# countrycode() is not doenot match term precisely, it will identify any term, which includes country name or adjective of a country name, as a country. So, the mentioned country number counted in this way will be timesed.
+
+freq_table$countryname_modified <- countrycode(freq_table$term, origin = 'country.name', destination = 'cldr.name.en',)
+
+tep <-freq_table[,c("term","n")] %>% group_by(freq_table$countryname_modified) %>% summarise(sum(n))
+tep[order(tep$`sum(n)`, decreasing = T),]
+```
+
+
+***
+3.Make a visual of these 10 countries and their frequencies
+
+```{r}
+df <- countries_mentioned[1:10,]
+ggplot(df, aes(x = reorder(term, -freq), y = freq, fill = term))+ geom_bar(stat = "identity", show.legend = FALSE)+ xlab("Country")+ ylab("Frequency") + ggtitle("Top 10 mentioned countries")
+```
+
+***
+4. Of the 5 countries with the highest term count, compare the counts to the mentions of the United States. Show how these terms counts have changed over time.
+
+```{r}
+terms <- c(df$term[1:6])
+term_count <- dtm[, which(colnames(dtm) %in% terms)]
+term_count <- data.frame(year = speeches$year, as.data.frame(term_count))
+
+df2 <- melt(term_count, id.vars = c("year"), variable.name = "term", value.name = "count")
+ggplot(df2, aes(x = year, y = count, color = term))+ 
+  geom_line(linetype = 2)+ 
+  geom_point()+
+  labs(col ="Country")
+```
+
+***
+5.Calculate the TF-IDF values for the DTM. In which year's address does the term 'iraq' provide the most semantic contribution? Evaluate the terms with the highest TF-IDF values in that address. Based on that finding, what do you infer that the speech was about?
+
+```{r}
+# calculate TF-IDF
+number_of_docs <- nrow(dtm)
+docs_term_appear <- colSums(dtm > 0)
+idf <- log(number_of_docs / docs_term_appear)
+
+tf_idf <- t(t(dtm) * idf)
+names(tf_idf) <- colnames(dtm)
+rownames(tf_idf) <- speeches$year
+tf_idf <- data.frame(tf_idf)
+```
+
+```{r}
+tf_idf[which.max(tf_idf$iraq),][,c("iraq","abandon")]
+```
+In year 2002, "iraq" is most mentioned.
+
+```{r}
+speech_2002 <- tf_idf['2002',]
+speech_2002 <- melt(speech_2002)
+colnames(speech_2002) <- c("term", "tfidf")
+```
+```{r}
+# ranking term with high tfidf value
+speech_2002[order(speech_2002$tfidf, decreasing = T),][1:15,]
+```
+Based on the term ranking, this speech is probably about the terrorism issues linked to Saddam Hussein in Iraq, as well as the wish of peace is stated.
+
+***
+6. Perform a time series analysis on the terms 'nuclear,' 'terrorist,' and 'freedom' using TF-IDF values. How does the use of these terms change over time? Make a visual and describe your results.
+
+```{r}
+tf_idf_char <- tf_idf[, which(colnames(tf_idf) %in% c('nuclear', 'terrorist','freedom'))]
+tf_idf_char <- data.frame(year = speeches$year, as.data.frame(tf_idf_char))
+
+df3 <- melt(tf_idf_char, id.vars = c("year"), variable.name = "term", value.name = "tfidf")
+ggplot(df3, aes(x = year, y = tfidf, color = term)) +
+  geom_line() + geom_point()
+
+```
+
+From above graph, it can be seen that the most of the tfidf values for these three terms are above zero, seeming like peace is an everlasting topic from 1970 to 2010. <br>
+In 1974, "nuclear" term is highly addressed, which is the year India first conducted nuclear bomb test; <br>
+In 2001, "terrorist" term skyrocketed, and tfidf is almost 10; it might be greatly affected by the September 11 attacks. <br>
+The term of "peace" are not addressed as frequently as "nuclear" and "terrorist", but there is still a small peak in 1989 catching our eyes. It is probably linked to the Tiananmen Square Crackdown happened that time. <br>
+
+
+
+
+
+
+

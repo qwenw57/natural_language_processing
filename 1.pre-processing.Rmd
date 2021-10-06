@@ -1,0 +1,128 @@
+---
+title: "Qingwen Wang_ECON630_Lab#1"
+output: html_document
+date: 09-04-2021
+---
+### Build a data preprocessing function.
+```{r message=FALSE}
+library(plyr)
+library(dplyr)
+library(textclean)
+library(tm)
+library(textstem)
+```
+
+```{r}
+# always set stringsAsFactors = FALSE when working with text data
+options(stringsAsFactors = F)
+```
+
+```{r}
+tweets <- read.csv("../datasets/city_of_SF_tweets.csv")
+tweets$Message
+```
+```{r}
+class(tweets$Message)
+```
+
+```{r pre-processing}
+# focus on keywords, hashtags, mentions, and emojis. 
+# not interested in hyperlinks, phone numbers, and addresses
+
+pre_process_corpus <- function(data, text_col, 
+                               replace_numbers = FALSE, replace_emojis = TRUE,
+                               replace_hashtags = TRUE, replace_mentions = TRUE,
+                               remove_weblinks = TRUE,
+                               non_stopwords = NULL, extra_stopwords = NULL,
+                               root_gen = NULL, output_corpus = FALSE
+                               ) {
+
+  # replacing contraction
+  text <- replace_contraction(data[, text_col])
+  
+  # replace numbers
+    # NOTE: wrapping in suppressWarnings function bc long strings of numbers produce warnings but do not affect accuracy
+  if(replace_numbers == T){
+    text <- suppressWarnings(replace_number(text))
+  }
+  
+  # removing non-ascii characters
+  text <- gsub("[^\001-\177]",'', text, perl = TRUE)
+  
+  # replace emoji with words
+  if(replace_emojis == T){
+    text <- replace_emoji(text)
+  }
+  # remove hachtag symbols and mention symbols
+  if(replace_hashtags == T) {
+    text <- gsub('([[:lower:]])([[:upper:]]+)', '\\1 \\2', text)
+    text <- gsub("#",'', text)
+  }
+  if(replace_mentions == T) {
+    text <- gsub("@",'', text)
+  }
+    
+ # converting text to lower case
+  text <- tolower(text)
+  
+  # split into strings and remove url link
+    # grepl(), which returns TRUE when a pattern is found 
+    # lapply(), which applies function to every element in the list and return lists of function result per element.
+  if(remove_weblinks == T){
+    text <- strsplit(text, " ")
+    text <- unlist(lapply(text, function(x) {
+      paste(x[!grepl("http| .edu| .com |.org |.net", x)], collapse = " ")
+    }))
+  }
+
+  # converting to volatile corpus, which containing attributes designed for text analysis
+  text <- VCorpus(VectorSource(text))
+  
+  # removing terms from stopwords dictionary
+    # which(), accepts only the arguments with type of as logical, and returns index
+  stopwords <- stopwords()
+  stopwords <- stopwords[which(!stopwords %in% non_stopwords)]
+  
+  # adding stopwords
+  stopwords <- c(stopwords,extra_stopwords)
+    
+  # removing stopwords
+  text <- tm_map(text, function(x) {removeWords(x,stopwords)})
+    
+  # removing punctuation, numbers, and whitespace
+  text <- tm_map(text, function(x) {removePunctuation(x)})
+  text <- tm_map(text, function(x) {removeNumbers(x)})
+  text <- tm_map(text, function(x) {stripWhitespace(x)})
+  
+  # generating term roots by stemming or lemmatizing
+  if(!is.null(root_gen)){
+    if(root_gen == "stem"){
+      text <- unlist(lapply(text, function(x) {stem_strings(x$content)}))
+      text <- VCorpus(VectorSource(text))
+    }
+    if(root_gen == "lemmatize"){
+      text <- unlist(lapply(text, function(x) {lemmatize_strings(x$content)}))
+      text <- VCorpus(VectorSource(text))
+    }
+  }
+  
+  if(output_corpus == T){
+    return(text)
+  } else {return(ldply(lapply(text, function(x){x$content}),data.frame)[,2])}
+  
+  }
+```
+
+```{r}
+pre_process_corpus(tweets, "Message", root_gen = "lemmatize")
+```
+
+```{r}
+pre_process_corpus(tweets, "Message", root_gen = "stem")
+```
+***
+Summary:<br>
+My function can successfully locate and transform emojis, hashtags and mentions into words; as well as removing the website link, which is meaningless for analysis. <br>
+Results for lemmatization works better than stemmming for this dataset based on the overall interpretability across documents. For example, stemming overly removed some letters as suffixes, such as stemming 'change' into 'chang' and 'badge' into 'badg'. But, we are not saying lemmatization is all-around better than stemming, for example, it failed to transform 'covering' into 'cover' in sentence 1. That is because lemmatization does not simply chop off inflections or remove the suffixes, but instead relies on a lexical knowledge based on conjugation to obtain the correct base forms of words.
+
+

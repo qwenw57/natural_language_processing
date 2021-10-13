@@ -1,0 +1,414 @@
+---
+title: "ECON630 Lab6 QingwenWang"
+output: html_document
+---
+
+
+The data set contains 40k movie reviews from the imdb.com website. <br>
+
+To predict the sentiment of the reviews, with the consideration that mislabeling a negative review as 'positive' is the most important outcome to avoid. <br>
+
+```{r message=FALSE, warning=FALSE}
+source("~/Dropbox/ECON630/functions/load_NLP_env.R")
+load_NLP_env("~/Dropbox/ECON630/functions/")
+```
+
+```{r}
+movie <-  read.csv("~/Dropbox/ECON630/datasets/movie_reviews_train.csv")
+```
+
+```{r}
+table(movie$label)
+```
+This is a balance data set. <br>
+
+
+#### 1. AFINN
+AFINN lexicon, which assigns words a score between -5 (most negative) and 5 (most positive)
+Pre-process our corpus without legitimatizing terms because AFINN includes conjugations. Only looking for words in the AFINN lexicon, so we limit our vocabulary to strictly those terms.
+
+
+```{r}
+library(tidytext)
+library(textdata)
+```
+
+```{r}
+afinn <- get_sentiments("afinn")
+head(afinn)
+```
+```{r}
+# remove words from the stopwords dictionary that appear in AFINN lexicon
+afinn_stopwords <- stopwords()[which(stopwords() %in% afinn$word)]
+text <- pre_process_corpus(movie, "text", replace_emojis = T, non_stopwords = afinn_stopwords)
+it <- itoken(text, tokenizer = word_tokenizer)
+vocab <- create_vocabulary(it)
+vectorizer <- vocab_vectorizer(vocab)
+dtm <- create_dtm(it, vectorizer)
+dim(dtm)
+```
+
+```{r}
+# subset DTM to only include the counts of words which appear in both the corpus and the sentiment dictionary.
+dtm <- dtm[, which(colnames(dtm) %in% afinn$word)]
+dim(dtm)
+
+# subset the sentiment dictionary, to have the same dimensionality to multiply the two matrix.
+afinn_reduced <- afinn[afinn$word %in% colnames(dtm),]
+dtm <- dtm[, order(colnames(dtm))]
+sentiment_value <- dtm %*% as.matrix(afinn_reduced$value)
+```
+
+```{r}
+df <- data.frame(assigned_sentiment = movie$label,
+                 afinn = sentiment_value[,1])
+
+by(df$afinn, df$assigned_sentiment, summary)
+```
+
+```{r}
+df$afinn_pred <- ifelse(df$afinn > 0 , 1, 0)
+table(df$assigned_sentiment, df$afinn_pred)
+```
+
+```{r}
+auc_afinn <- glmnet:::auc(df$assigned_sentiment, df$afinn_pred)
+auc_afinn
+```
+Since we want to avoid mislabeling a negative review as 'positive', so we want to focus on precision more than recall.
+```{r}
+# function to calibrate Fbeta
+calc_fbeta <- function(df, truth_col, truth_val, pred_col, pred_val, beta){
+  recall <- nrow(df[df[, truth_col] == truth_val & df[, pred_col] == pred_val,])/
+  nrow(df[df[, truth_col] == truth_val,])
+  precision <- nrow(df[df[, truth_col] == truth_val & df[, pred_col] == pred_val,])/
+  nrow(df[df[, pred_col] == pred_val,])
+  (1 + beta^2)*(precision * recall)/((beta^2 * precision) + recall)
+}
+```
+
+```{r}
+f05_afinn <- calc_fbeta(df,'assigned_sentiment', 1, 'afinn_pred', 1, 0.5)
+f05_afinn
+```
+
+#### 2. NRC
+```{r}
+nrc <- get_sentiments("nrc")
+
+nrc <- nrc[nrc$sentiment %in% c('positive', 'negative'),]
+nrc <- nrc[!nrc$word %in% nrc$word[duplicated(nrc$word)],]
+nrc$value <- ifelse(nrc$sentiment == 'positive', 1, -1)
+
+# no overlap between nrc and stopwords, so don't need to reprocess text
+nrc_stopwords <- stopwords()[which(stopwords() %in% nrc$word)]
+
+dtm <- create_dtm(it, vectorizer)
+dtm <- dtm[, which(colnames(dtm) %in% nrc$word)]
+
+nrc_reduced <- nrc[nrc$word %in% colnames(dtm),]
+dtm <- dtm[, order(colnames(dtm))]
+
+sentiment_value <- dtm %*% as.matrix(nrc_reduced$value)
+
+df$nrc <- sentiment_value[,1]
+
+df$nrc_pred <- ifelse(df$nrc > 0, 1, 0)
+table(df$assigned_sentiment, df$nrc_pred)
+
+auc_nrc <- glmnet:::auc(df$assigned_sentiment, df$nrc_pred)
+auc_nrc
+```
+
+```{r}
+f05_afinn <- calc_fbeta(df,'assigned_sentiment', 1, 'nrc_pred', 1, 0.5)
+f05_afinn
+```
+
+```{r}
+df_long <- melt(df[, c('assigned_sentiment', 'afinn', 'nrc')], 
+                id = 'assigned_sentiment', 
+                value.name = 'calculated_sentiment',
+                variable.name = 'lexicon')
+
+ggplot(df_long, aes(x = as.factor(assigned_sentiment), y = calculated_sentiment, color = lexicon)) +
+  geom_boxplot() +
+  scale_size_area(max_size = 50) + 
+  theme(legend.position = 'top') 
+```
+
+
+#### 3. Managing Negation <br>
+One of the biggest drawbacks to the bag of words approach we used above is that it does not account for negation ("not","never","neither","none").  For example, the two sentences ‘this is great’ and ‘this is not great’ convey practically opposite sentiments despite the only difference being the presence of the word ‘not.’  <br>
+- Approach 1: add negation terms to the lexicon and assign them a negative value. <br>
+- Approach 2: reverse the polarity of bigrams that start with a negation term. <br>
+
+
+Approach 1 of managing Negation with AFFIN lexicon
+```{r}
+# add negation terms to the lexicon and assign them a negative value, then recalculate the sentiment
+
+neg_terms <- c('no', 'not', 'none', 'nobody', 'nothing', 'neither', 'nowhere', 'never',
+               'hardly', 'scarcely', 'barely')
+afinn_neg <- rbind(afinn, data.frame(word = neg_terms[!neg_terms %in% afinn$word],
+                                     value = -1))
+afinn_neg <- afinn_neg[order(afinn_neg$word),]
+
+dtm <- create_dtm(it, vectorizer)
+dtm <- dtm[, which(colnames(dtm) %in% afinn_neg$word)]
+
+afinn_neg_reduced <- afinn_neg[afinn_neg$word %in% colnames(dtm),]
+dtm <- dtm[, order(colnames(dtm))]
+
+sentiment_value <- dtm %*% as.matrix(afinn_neg_reduced$value)
+
+df$afinn_neg <- sentiment_value[, 1]
+df$afinn_neg_pred <- ifelse(df$afinn_neg > 0, 1, 0)
+
+auc_afinn_neg <- glmnet:::auc(df$assigned_sentiment, df$afinn_neg_pred)
+auc_afinn_neg
+```
+```{r}
+f05_afinn_neg <- calc_fbeta(df,'assigned_sentiment', 1, 'afinn_neg_pred', 1, 0.5)
+f05_afinn_neg
+```
+
+
+Approach 1 managing Negation with AFFIN lexicon:
+```{r}
+nrc_neg <- rbind(nrc, data.frame(word = neg_terms[!neg_terms %in% nrc$word],
+                                     sentiment = NA, value = -1))
+nrc_neg <- nrc_neg[order(nrc_neg$word),]
+
+dtm <- create_dtm(it, vectorizer)
+dtm <- dtm[, which(colnames(dtm) %in% nrc_neg$word)]
+
+nrc_neg_reduced <- nrc_neg[nrc_neg$word %in% colnames(dtm),]
+dtm <- dtm[, order(colnames(dtm))]
+
+sentiment_value <- dtm %*% as.matrix(nrc_neg_reduced$value)
+
+df$nrc_neg <- sentiment_value[, 1]
+df$nrc_neg_pred <- ifelse(df$nrc_neg > 0, 1, 0)
+
+auc_nrc_neg <- glmnet:::auc(df$assigned_sentiment, df$nrc_neg_pred)
+auc_nrc_neg
+```
+
+```{r}
+f05_nrc_neg <- calc_fbeta(df,'assigned_sentiment', 1, 'nrc_neg_pred', 1, 0.5)
+f05_nrc_neg
+```
+
+Approach 2 managing Negation with AFFIN lexicon:
+```{r}
+vocab_bi <- create_vocabulary(it, ngram = c(1,2))
+
+vectorizer_bi <- vocab_vectorizer(vocab_bi)
+
+# index of terms that start with a negation term and end with an AFINN term 
+  # Note: need to exempt 'no' from AFINN lexicon because it is also a negation term
+afinn_bi <- sapply(vocab_bi$term, function(x) {
+  strsplit(x, "_")[[1]][1] %in% neg_terms &&
+    strsplit(x, "_")[[1]][2] %in% afinn$word[afinn$word != "no"]})
+
+vocab_bi$term[afinn_bi][1:10]
+```
+
+```{r}
+# reverse sentiment polarity, and add it to the lexicon
+pol_bi <- vocab_bi$term[afinn_bi]
+pol_bi_value <- unlist(sapply(pol_bi, function(x){
+  terms <- strsplit(x, "_")[[1]]
+  terms <- terms[terms != "no"]
+  afinn[which(afinn$word %in% terms), "value"] * -1
+}))
+afinn_bi <- rbind(afinn, data.frame(word = pol_bi, value = pol_bi_value))
+```
+
+```{r}
+dtm <- create_dtm(it, vectorizer_bi)
+dtm <- dtm[, which(colnames(dtm) %in% afinn_bi$word)]
+
+afinn_bi_reduced <- afinn_bi[afinn_bi$word %in% colnames(dtm),]
+dtm <- dtm[, order(colnames(dtm))]
+
+sentiment_value <- dtm %*% as.matrix(afinn_bi_reduced$value)
+
+df$afinn_bi <- sentiment_value[, 1]
+df$afinn_bi_pred <- ifelse(df$afinn_bi > 0, 1, 0)
+
+auc_afinn_bi <- glmnet:::auc(df$assigned_sentiment, df$afinn_bi_pred)
+auc_afinn_bi
+```
+```{r}
+f05_afinn_bi <- calc_fbeta(df, 'assigned_sentiment', 1, 'afinn_bi_pred', 1, 0.5)
+f05_afinn_bi
+```
+
+Approach 2 managing Negation with NRC lexicon:
+```{r}
+nrc_bi <- sapply(vocab_bi$term, function(x) {
+  strsplit(x, "_")[[1]][1] %in% neg_terms &&
+    strsplit(x, "_")[[1]][2] %in% nrc$word})
+
+pol_bi <- vocab_bi$term[nrc_bi]
+pol_bi_value <- unlist(sapply(pol_bi, function(x){
+  terms <- strsplit(x, "_")[[1]][2]
+  nrc[which(nrc$word %in% terms), "value"] * -1
+}))
+nrc_bi <- rbind(nrc, data.frame(word = pol_bi, sentiment = NA, value = pol_bi_value))
+
+dtm <- create_dtm(it, vectorizer_bi)
+dtm <- dtm[, which(colnames(dtm) %in% nrc_bi$word)]
+
+nrc_bi_reduced <- nrc_bi[nrc_bi$word %in% colnames(dtm),]
+dtm <- dtm[, order(colnames(dtm))]
+
+sentiment_value <- dtm %*% as.matrix(nrc_bi_reduced$value)
+
+df$nrc_bi <- sentiment_value[, 1]
+df$nrc_bi_pred <- ifelse(df$nrc_bi > 0, 1, 0)
+
+```
+
+
+```{r}
+auc_nrc_bi <- glmnet:::auc(df$assigned_sentiment, df$nrc_bi_pred)
+auc_nrc_bi
+```
+
+```{r}
+f05_afinn_bi <- calc_fbeta(df, 'assigned_sentiment', 1, 'nrc_bi_pred', 1, 0.5)
+f05_afinn_bi
+```
+
+#### 4. use sentimentr
+```{r}
+library(sentimentr)
+head(sentiment(movie$text[14362]),3)
+```
+
+```{r}
+afinn_sentr <- afinn[!afinn$word %in% lexicon::hash_valence_shifters$x, ]
+colnames(afinn_sentr) <- c('x', 'y')
+afinn_sentr <- as_key(afinn_sentr)
+```
+
+```{r}
+sent_val_sentr_afinn <- sapply(movie$text, function(x) {
+get_sentences(x) %>% sentiment(polarity_dt = afinn_sentr) %>%
+subset(select = sentiment) %>% as.matrix %>% mean
+  })
+
+df$afinn_sentr <- sent_val_sentr_afinn
+df$afinn_sentr_pred <- ifelse(df$afinn_sentr > 0, 1, 0)
+```
+
+```{r}
+f05_afinn_sentr <- calc_fbeta(df, 'assigned_sentiment', 1, 'afinn_sentr_pred', 1, 0.5)
+f05_afinn_sentr
+```
+F score (beta = 0.5) is 0.7 for sentiment() approach with AFINN lexicon.
+```{r}
+sent_val_sentr_nrc <- sapply(movie$text, function(x) {
+ get_sentences(x) %>% sentiment(polarity_dt = lexicon::hash_sentiment_nrc) %>%
+ subset(select = sentiment) %>% as.matrix %>% mean
+})
+
+df$nrc_sentr <- sent_val_sentr_nrc
+df$nrc_sentr_pred <- ifelse(df$nrc_sentr > 0, 1, 0)
+
+f05_nrc_sentr <- calc_fbeta(df, 'assigned_sentiment', 1, 'nrc_sentr_pred', 1, 0.5)
+f05_nrc_sentr
+```
+
+```{r}
+confusion_table <- ldply(apply(df[, -1], 2, function(x) {
+  data.frame(true_positive = sum(x > 0 & df$assigned_sentiment == 1),
+  false_positive = sum(x > 0 & df$assigned_sentiment == 0) * -1,
+  true_negative = sum(x <= 0 & df$assigned_sentiment == 0),
+  false_negative = sum(x <= 0 & df$assigned_sentiment == 1) * -1)
+}), rbind)
+
+colnames(confusion_table)[1] <- 'model'
+confusion_table <- melt(confusion_table, id = 'model', value.name = 'count')
+confusion_table <- confusion_table[- grep("*pred", confusion_table$model),]
+
+library(pals)
+ggplot(confusion_table, aes(x = variable, y = count)) +
+  geom_col(aes(fill = model), position = 'dodge') + coord_flip() +
+  scale_fill_manual(values = paste0(alphabet(20), "FF"), name = "model") +
+  theme(axis.title.y=element_blank())
+```
+
+```{r}
+confusion_table[- grep("*pred", confusion_table$model),]
+```
+
+Approach worked best to predict positive sentiment is afinn_sentr, it has highest tpr and relative low fnr. affin_neg is also a good one, just slightly worse than afinn_sentr <br> 
+Approach worked best to predict negative sentiment is afinn_bi, it has highest tnr and lowest fpr. But, the shortcoming is that its tpr is too low.<br>
+
+In this case, we dont want to wrongly predict a negative review as 'positive', which means higher our precision, with high tpr and lower fpr. So, afinn_sentr and affin_neg are expected to be two best model to predict sentiment for this data set. But, afinn_sentr is much more computional expesive, and since these two models just have a slightly diffrence on performce, i think afinn_neg is the best model. <br> 
+
+####  Predict the sentiment of the test data set
+
+```{r}
+test <-  read.csv("~/Dropbox/ECON630/datasets/movie_reviews_test.csv")
+```
+
+```{r}
+# find optimal threshold on training set.
+score <- sapply(-5:15, function(x) {df$afinn_neg_pred <- ifelse(df$afinn_neg > x, 1, 0)
+    f05_afinn_neg <- calc_fbeta(df,'assigned_sentiment', 1, 'afinn_neg_pred', 1, 0.5)})
+
+treshold_tune <-data.frame(threshold = -5:15, score)
+treshold_tune[treshold_tune$score == max(treshold_tune$score),]
+```
+
+
+Approach: affin_neg
+```{r}
+afinn <- get_sentiments("afinn")
+# remove words from the stopwords dictionary that appear in AFINN lexicon
+afinn_stopwords <- stopwords()[which(stopwords() %in% afinn$word)]
+text <- pre_process_corpus(test, "text", replace_emojis = T, 
+                        non_stopwords = afinn_stopwords)
+afinn_stopwords <- stopwords()[which(stopwords() %in% afinn$word)]
+text <- pre_process_corpus(test, "text", replace_emojis = T, non_stopwords = afinn_stopwords)
+it <- itoken(text, tokenizer = word_tokenizer)
+vocab <- create_vocabulary(it)
+vectorizer <- vocab_vectorizer(vocab)
+
+neg_terms <- c('no', 'not', 'none', 'nobody', 'nothing', 'neither', 'nowhere', 'never',
+               'hardly', 'scarcely', 'barely')
+
+afinn_neg <- rbind(afinn, data.frame(word = neg_terms[!neg_terms %in% afinn$word],
+                                     value = -1))
+afinn_neg <- afinn_neg[order(afinn_neg$word),]
+
+dtm <- create_dtm(it, vectorizer)
+dtm <- dtm[, which(colnames(dtm) %in% afinn_neg$word)]
+
+afinn_neg_reduced <- afinn_neg[afinn_neg$word %in% colnames(dtm),]
+dtm <- dtm[, order(colnames(dtm))]
+
+sentiment_value <- dtm %*% as.matrix(afinn_neg_reduced$value)
+
+df <- data.frame(assigned_sentiment = test$label,
+                 afinn_neg = sentiment_value[,1])
+
+
+df$afinn_neg_pred <- ifelse(df$afinn_neg > 6, 1, 0)
+auc_afinn_neg <- glmnet:::auc(df$assigned_sentiment, df$afinn_neg_pred)
+auc_afinn_neg
+```
+
+```{r}
+f05_afinn_neg <- calc_fbeta(df, 'assigned_sentiment', 1, 'afinn_neg_pred', 1, 0.5)
+f05_afinn_neg
+```
+
+On the test set, afinn_neg shows a robust performce with AUC = 0.72, and F0.5 = 0.73. <br>
+
+

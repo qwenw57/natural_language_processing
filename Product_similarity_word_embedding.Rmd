@@ -3,6 +3,8 @@ title: "ECON630_Lab4_QingwenWang"
 output: html_document
 ---
 
+Objective: To find common brands and product features for washers, refrigerator, dishwasher and stove.
+
 ```{r message=FALSE, warning=FALSE}
 source("~/Dropbox/ECON630/functions/load_NLP_env.R")
 load_NLP_env("~/Dropbox/ECON630/functions/")

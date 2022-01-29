@@ -1,0 +1,308 @@
+---
+title: "Rock Music Analysis"
+output: html_document
+---
+
+Objective and Questions: <br>
+1. Topic Modelling: to understand what topics are rock song musics are always sing about?  <br>
+2. Classifier: to identify Rock Song Music just based on lyrics.
+
+Methodology:<br>
+Preprocessing: Tokenization and lemmatization, Word embedding, Term-Frequency <br>
+Modelling: SVM, Neural Network, Random Forest for classification, and LDA for Topic Modeling. <br>
+Visulization: Word Cloud, ggplot <br>
+
+```{r}
+source('~/dropbox/ECON630/functions/load_NLP_env.R')
+load_NLP_env('~/dropbox/ECON630/functions/')
+```
+
+```{r}
+lyrics <- read.csv('~/dropbox/ECON630/datasets/lyrics-data.csv')
+artists <- read.csv('~/dropbox/ECON630/datasets/artists-data.csv')
+```
+
+```{r}
+artists
+```
+
+```{r}
+head(lyrics)
+```
+```{r}
+table(artists$Genre)
+```
+
+```{r}
+lyrics <- lyrics[lyrics$Idiom == 'ENGLISH',]
+```
+
+```{r}
+data <- merge(x = artists, y = lyrics, by.x = "Link", by.y = 'ALink', all.x = TRUE)
+```
+
+```{r}
+data <- data[!duplicated(data$SName),]
+table(data$Genre)
+```
+
+```{r}
+library(tidyr)
+data <- data[data$Genre == 'Pop' | data$Genre == 'Hip Hop'| data$Genre == 'Rock',]
+data <- data %>% separate(Genres, 'Type')
+
+data <- data[, c('SName', 'Genre', 'Lyric')]
+data <- na.omit(data)
+dim(data)
+```
+
+```{r}
+# music_freq <- table(data$Type) %>%
+#         as.data.frame() %>%
+#         arrange(desc(Freq))
+```
+
+```{r}
+# music_freq$Freq[music_freq$Var1 == 'Rock']/sum(music_freq$Freq)
+```
+
+```{r}
+data$rock <- ifelse(data$Genre == 'Rock', 1, 0)
+```
+
+
+```{r}
+str(data)
+```
+
+```{r}
+text <- pre_process_corpus(data, "Lyric", replace_numbers = T, root_gen = 'lemmatize', extra_stopwords = c("can","will","let","go","you","just","see","know","now","hey"))
+data$lyrics_preprocessed  <- text
+```
+
+```{r}
+save(data, file = "~/dropbox/ECON630/datasets/data.RData")
+load("~/dropbox/ECON630/datasets/data.RData")
+```
+
+```{r}
+library(caret)
+rand <- runif(nrow(data))
+sets <- ifelse(rand < 0.8, 'train', 'test')
+data$set <- sets 
+train <- data[data$set == 'train',]
+test <- data[data$set == 'test',]
+
+traindown<-downSample(x=train[,3],
+                  y=as.factor(train$rock))
+
+colnames(traindown) <- c("lyrics_preprocessed", "rock")
+traindown$lyrics_preprocessed <- as.character(traindown$lyrics_preprocessed)
+
+it_train <- itoken(traindown$lyrics_preprocessed,
+                   tokenizer = word_tokenizer, ids = traindown$id)
+vocab <- create_vocabulary(it_train, ngram = c(1, 3))
+
+lbound <- round(0.009 * nrow(train))
+ubound <- nrow(train) - lbound
+
+vocab <- vocab[vocab$doc_count > lbound & vocab$doc_count < ubound,]
+
+vectorizer <- vocab_vectorizer(vocab)
+dtm_train <- create_dtm(it_train, vectorizer)
+
+it_test <- itoken(test$lyrics_preprocessed,
+                   tokenizer = word_tokenizer, ids = test$id)
+
+dtm_test <- create_dtm(it_test, vectorizer)
+```
+
+
+Logistic regression:
+```{r}
+library(glmnet)
+model_dtm <- cv.glmnet(x = as.matrix(dtm_train), y = traindown$rock, type.measure = 'auc', 
+                       family = 'binomial',
+                       alpha = 1)
+```
+
+```{r}
+plot(model_dtm)
+```
+AUC: 0.7337
+```{r}
+model_dtm
+```
+
+
+```{r}
+table(data$rock)
+```
+
+```{r}
+library(caret)
+calculate_my_metric <- function(data, lev = NULL, model = NULL){
+  recall <- nrow(data[data$obs == 1 & data$pred == 1,])/
+  nrow(data[data$obs == 1,])
+  precision <- nrow(data[data$obs == 1 & data$pred == 1,])/
+  nrow(data[data$pred == 1,])
+  out <- (1 + 1^2)*(precision * recall)/((1^2 * precision) + recall)
+  names(out) <- 'f1'
+  out
+}
+trctrl <- trainControl(method = "repeatedcv", number = 5, repeats = 3, summaryFunction = calculate_my_metric)
+```
+
+SVM:
+```{r}
+# library(LiblineaR)
+# library(glmnet)
+# library(e1071)
+# 
+# model_svm <- train(x = as.matrix(dtm_train),
+#                  y = as.factor(train$rock),
+#                  method = "svmLinearWeights2",
+#                  trControl = trctrl            
+#                  )
+# 
+# pred_test <- predict(model_svm, as.matrix(dtm_test))
+# 
+# preds <- data.frame(id = data$SName[data$set == "test"], 
+#                     label = data$rock[data$set == "test"],
+#                     svm = as.character(pred_test))
+# 
+# auc_svm <- sum(preds$label == pred_test)/nrow(preds)
+# auc_svm
+```
+
+Navie Bayes:
+```{r}
+library(naivebayes)
+model_nb <- train(x = as.matrix(dtm_train),
+                y = as.factor(traindown$rock),
+                method = "naive_bayes",
+                metric = 'f1',
+                trControl = trctrl)
+
+pred_test <- predict(model_nb, as.matrix(dtm_test))
+
+preds <- data.frame(id = data$SName[data$set == "test"],
+                    label = data$rock[data$set == "test"],
+                    nb = as.character(pred_test))
+
+auc_nb <- sum(preds$label == pred_test)/nrow(preds)
+auc_nb
+
+```
+
+0.77
+Random Forest:
+```{r}
+library(caTools)
+model_rf <- train(as.matrix(dtm_train),
+            y = as.factor(train$rock),
+            method = "ranger",
+            trControl = trctrl,
+            tuneGrid = data.frame(mtry = floor(sqrt(dim(as.matrix(dtm_train))[2])),
+                            splitrule = "gini",
+                            min.node.size = 1))
+
+pred_test <- predict(model_rf, as.matrix(dtm_test))
+
+preds$rf <- as.numeric(as.character(pred_test))
+auc_rf <- sum(preds$label == pred_test)/nrow(preds)
+auc_rf
+
+```
+random forest 0.7420616
+
+```{r}
+# 
+# tunegrid <-expand.grid(
+#                         .mtry = 25:45,
+#                         .splitrule = "gini",
+#                         .min.node.size = c(10,15,20,25))
+# model_rf <- train(as.matrix(dtm_train),
+#             y = as.factor(train$rock),
+#             method = "ranger",
+#             trControl =trctrl,
+#             tuneGrid = tunegrid)
+```
+
+
+```{r}
+# saveRDS(model_rf, "model_rf.rds")
+my_model <- readRDS("model_rf.rds")
+```
+
+```{r}
+# png('rplot.png',width = 700, height = 500)
+plot(my_model)
+```
+
+
+```{r}
+pred_test <- predict(model_rf, as.matrix(dtm_test))
+
+preds$rf <- as.numeric(as.character(pred_test))
+auc_rf <- sum(preds$label == pred_test)/nrow(preds)
+auc_rf
+```
+
+1. classify songs svm, navie bayes lstm
+2. recommend similar songs based on topic modeling and sentiment analysis
+
+
+```{r}
+rock_lyrics <- data$lyrics_preprocessed[data$rock == 1]
+it <- itoken(rock_lyrics, tokenizer = word_tokenizer)
+vocab_full <- create_vocabulary(it, ngram = c(1,3))
+
+lbound <- 600
+ubound <- 12800
+vocab <- vocab_full[vocab_full$doc_count > lbound & vocab_full$doc_count < ubound,]
+vectorizer <- vocab_vectorizer(vocab)
+dtm <- create_dtm(it,vectorizer)
+sparse_corpus <- Matrix(dtm, sparse = T)
+```
+
+```{r message=FALSE, warning=FALSE}
+# find optimal k
+docs <- apply(dtm, 1, function(x){
+  tmp <- as.data.frame(x)
+  tmp$vocab <- 1:nrow(tmp)
+  tmp <- tmp[tmp[,1] >0,]
+  tmp <- as.matrix.data.frame(t(tmp[, c(2,1)]))
+  return(tmp)
+})
+
+# run ksearch function and analyze results
+ksearch <- searchK(documents = docs, vocab = colnames(dtm), K = c(3:21), init.type = 'LDA')
+```
+
+```{r}
+df <- data.frame(ksearch$results[,1:3])
+ggplot(df, mapping = aes( x = as.numeric(K),  y = as.numeric(exclus)))+ geom_point() +geom_line()
+```
+```{r}
+topic_model <- stm(sparse_corpus, init.type = 'LDA', seed = 12345, K = 12)
+topic_content <- as.data.frame(t(exp(topic_model$beta$logbeta[[1]])))
+apply(topic_content, 2, function(x) {topic_model$vocab[order(x, decreasing = T)[1:10]]})
+```
+```{r}
+rock_lyrics <- data$lyrics_preprocessed[data$Type == 'Rock']
+it <- itoken(rock_lyrics, tokenizer = word_tokenizer)
+vocab_full <- create_vocabulary(it, ngram = c(1,3))
+
+lbound <- 22259*0.05
+ubound <- 22259*0.98
+vocab <- vocab_full[vocab_full$doc_count > lbound & vocab_full$doc_count < ubound,]
+vectorizer <- vocab_vectorizer(vocab)
+dtm <- create_dtm(it,vectorizer)
+sparse_corpus <- Matrix(dtm, sparse = T)
+
+topic_model <- stm(sparse_corpus, init.type = 'LDA', seed = 12345, K = 12)
+topic_content <- as.data.frame(t(exp(topic_model$beta$logbeta[[1]])))
+apply(topic_content, 2, function(x) {topic_model$vocab[order(x, decreasing = T)[1:10]]})
+```
+
